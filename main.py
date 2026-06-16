@@ -7,7 +7,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from playwright.async_api import async_playwright, Error as PlaywrightError
+from playwright.async_api import async_playwright
 
 logger = get_logger('plugin-AIHTML', 'orange')
 
@@ -19,25 +19,58 @@ DEBUG_SAVE_HTML = True
 
 async def ensure_chromium_installed():
     """
-    检查 Chromium 是否已安装，若未安装则自动执行安装。
+    检查 Chromium 是否已安装并可正常运行，若未安装则自动安装。
+    兼容 Windows 和 Linux 环境。
     """
+    # 先尝试启动 Chromium 验证是否可用
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch()
             await browser.close()
-        logger.info("Chromium 已存在，跳过安装。")
-    except PlaywrightError as e:
-        if "Executable doesn't exist" in str(e) or "browser not found" in str(e).lower():
-            logger.info("Chromium 未找到，正在安装...")
-            subprocess.run(
-                [sys.executable, "-m", "playwright", "install", "chromium"],
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            logger.info("Chromium 安装完成。")
-        else:
-            raise
+        logger.info("Chromium 已存在且可正常启动。")
+        return
+    except Exception as e:
+        logger.warning(f"Chromium 启动检查失败: {e}")
+
+    # 启动失败 → 尝试安装 Chromium
+    logger.info("正在安装 Chromium（视网络情况可能需要较长时间）...")
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        logger.info("Chromium 安装完成。")
+    except Exception as install_err:
+        raise RuntimeError(
+            f"Chromium 自动安装失败: {install_err}\n"
+            f"请尝试手动运行: {sys.executable} -m playwright install chromium"
+        )
+
+    # Linux 环境需要额外安装系统依赖；Windows/Mac 上该命令不存在，忽略即可
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install-deps", "chromium"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        logger.info("Chromium 系统依赖安装完成。")
+    except Exception:
+        logger.info("跳过 playwright install-deps（非 Linux 环境无需此步骤）。")
+
+    # 安装后再次验证
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch()
+            await browser.close()
+        logger.info("Chromium 安装验证通过。")
+    except Exception as e:
+        raise RuntimeError(
+            f"Chromium 安装后仍无法启动: {e}\n"
+            f"当前系统可能缺少必要的运行时库，请参考 Playwright 官方文档安装依赖。"
+        )
 
 
 class AIHTML(BasePlugin):
@@ -68,7 +101,14 @@ class AIHTML(BasePlugin):
             raise ValueError("HTML 内容为空或过短，无法渲染。")
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            try:
+                browser = await p.chromium.launch(headless=True)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Chromium 浏览器启动失败: {e}\n"
+                    f"请确保已安装 Chromium 及系统依赖。"
+                )
+
             page = await browser.new_page(
                 viewport={"width": SCREENSHOT_WIDTH, "height": SCREENSHOT_HEIGHT}
             )

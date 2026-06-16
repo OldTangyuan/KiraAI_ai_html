@@ -6,6 +6,7 @@ from core.chat.message_elements import Image
 import subprocess
 import sys
 import time
+import asyncio
 from pathlib import Path
 from playwright.async_api import async_playwright
 
@@ -17,10 +18,10 @@ SCREENSHOT_HEIGHT = 800
 DEBUG_SAVE_HTML = True
 
 
-async def ensure_chromium_installed():
+async def _install_chromium():
     """
-    检查 Chromium 是否已安装并可正常运行，若未安装则自动安装。
-    兼容 Windows 和 Linux 环境。
+    异步安装 Chromium 及系统依赖（不阻塞插件初始化）。
+    安装完成后返回 True，失败则返回 False。
     """
     # 先尝试启动 Chromium 验证是否可用
     try:
@@ -28,12 +29,12 @@ async def ensure_chromium_installed():
             browser = await p.chromium.launch()
             await browser.close()
         logger.info("Chromium 已存在且可正常启动。")
-        return
+        return True
     except Exception as e:
-        logger.warning(f"Chromium 启动检查失败: {e}")
+        logger.warning(f"Chromium 启动检查失败（将尝试安装）: {e}")
 
     # 启动失败 → 尝试安装 Chromium
-    logger.info("正在安装 Chromium（视网络情况可能需要较长时间）...")
+    logger.info("正在后台安装 Chromium（视网络情况可能需要较长时间）...")
     try:
         subprocess.run(
             [sys.executable, "-m", "playwright", "install", "chromium"],
@@ -43,10 +44,8 @@ async def ensure_chromium_installed():
         )
         logger.info("Chromium 安装完成。")
     except Exception as install_err:
-        raise RuntimeError(
-            f"Chromium 自动安装失败: {install_err}\n"
-            f"请尝试手动运行: {sys.executable} -m playwright install chromium"
-        )
+        logger.error(f"Chromium 自动安装失败: {install_err}")
+        return False
 
     # Linux 环境需要额外安装系统依赖；Windows/Mac 上该命令不存在，忽略即可
     try:
@@ -66,11 +65,10 @@ async def ensure_chromium_installed():
             browser = await p.chromium.launch()
             await browser.close()
         logger.info("Chromium 安装验证通过。")
+        return True
     except Exception as e:
-        raise RuntimeError(
-            f"Chromium 安装后仍无法启动: {e}\n"
-            f"当前系统可能缺少必要的运行时库，请参考 Playwright 官方文档安装依赖。"
-        )
+        logger.error(f"Chromium 安装后仍无法启动: {e}")
+        return False
 
 
 class AIHTML(BasePlugin):
@@ -78,27 +76,47 @@ class AIHTML(BasePlugin):
         super().__init__(ctx, cfg)
         self.data_dir: Path = None
         self.output_dir: Path = None
+        # 用于同步 Chromium 就绪状态：工具调用需等待该事件
+        self._chromium_ready = asyncio.Event()
+        self._chromium_ok = False
 
     async def initialize(self):
         """插件加载时调用，在此初始化资源、注册事件等"""
-        await ensure_chromium_installed()
         self.data_dir = self.ctx.get_plugin_data_dir()
         self.output_dir = self.data_dir / "output"
         self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        # 后台安装 Chromium，不阻塞插件初始化和其他插件
+        asyncio.create_task(self._background_chromium_setup())
+
         logger.info('AIHTML 插件加载完成！')
+
+    async def _background_chromium_setup(self):
+        """后台安装 Chromium，完成后通过 Event 通知等待者。"""
+        self._chromium_ok = await _install_chromium()
+        self._chromium_ready.set()
+        if self._chromium_ok:
+            logger.info("Chromium 已就绪，可以开始渲染网页。")
+        else:
+            logger.error("Chromium 安装失败，渲染功能不可用。")
 
     async def terminate(self):
         pass
 
     # ==================== 核心逻辑 ====================
 
-    @staticmethod
-    async def _render_html_to_image(html_content: str, output_path: str):
+    async def _render_html_to_image(self, html_content: str, output_path: str):
         """
-        使用 Playwright 将 HTML 渲染为 PNG 截图（异步函数）。
+        使用 Playwright 将 HTML 渲染为 PNG 截图。
+        若 Chromium 尚未安装完成，则等待安装完成。
         """
         if not html_content or len(html_content) < 30:
             raise ValueError("HTML 内容为空或过短，无法渲染。")
+
+        # 等待 Chromium 就绪（后台安装尚未完成则等待）
+        await self._chromium_ready.wait()
+        if not self._chromium_ok:
+            raise RuntimeError("Chromium 安装失败，无法渲染网页。请检查日志后重试。")
 
         async with async_playwright() as p:
             try:

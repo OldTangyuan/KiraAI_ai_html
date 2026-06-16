@@ -1,0 +1,2 @@
+# KiraAI_ai_html
+kira_ai的一个插件，通过让AI生成html并以图片形式渲染发送出来

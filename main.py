@@ -6,9 +6,8 @@ from core.chat.message_elements import Image
 import subprocess
 import sys
 import time
-import asyncio
 from pathlib import Path
-from playwright.sync_api import sync_playwright, Error as PlaywrightError
+from playwright.async_api import async_playwright, Error as PlaywrightError
 
 logger = get_logger('plugin-AIHTML', 'orange')
 
@@ -18,14 +17,14 @@ SCREENSHOT_HEIGHT = 800
 DEBUG_SAVE_HTML = True
 
 
-def ensure_chromium_installed():
+async def ensure_chromium_installed():
     """
     检查 Chromium 是否已安装，若未安装则自动执行安装。
     """
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch()
-            browser.close()
+        async with async_playwright() as p:
+            browser = await p.chromium.launch()
+            await browser.close()
         logger.info("Chromium 已存在，跳过安装。")
     except PlaywrightError as e:
         if "Executable doesn't exist" in str(e) or "browser not found" in str(e).lower():
@@ -49,7 +48,7 @@ class AIHTML(BasePlugin):
 
     async def initialize(self):
         """插件加载时调用，在此初始化资源、注册事件等"""
-        ensure_chromium_installed()
+        await ensure_chromium_installed()
         self.data_dir = self.ctx.get_plugin_data_dir()
         self.output_dir = self.data_dir / "output"
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -61,30 +60,30 @@ class AIHTML(BasePlugin):
     # ==================== 核心逻辑 ====================
 
     @staticmethod
-    def _render_html_to_image(html_content: str, output_path: str):
+    async def _render_html_to_image(html_content: str, output_path: str):
         """
-        使用 Playwright 将 HTML 渲染为 PNG 截图（同步函数）。
+        使用 Playwright 将 HTML 渲染为 PNG 截图（异步函数）。
         """
         if not html_content or len(html_content) < 30:
             raise ValueError("HTML 内容为空或过短，无法渲染。")
 
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page(
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page(
                 viewport={"width": SCREENSHOT_WIDTH, "height": SCREENSHOT_HEIGHT}
             )
 
             try:
-                page.set_content(
+                await page.set_content(
                     html_content, wait_until="domcontentloaded", timeout=10000
                 )
             except Exception as e:
-                browser.close()
+                await browser.close()
                 raise RuntimeError(f"Playwright 加载 HTML 失败: {e}")
 
-            page.wait_for_timeout(1500)
+            await page.wait_for_timeout(1500)
             try:
-                page.wait_for_function(
+                await page.wait_for_function(
                     "document.body && document.body.scrollHeight > 10",
                     timeout=3000
                 )
@@ -92,12 +91,12 @@ class AIHTML(BasePlugin):
                 logger.warning("检测到 body 高度可能为 0，页面可能空白。")
 
             try:
-                page.screenshot(path=output_path, full_page=True)
+                await page.screenshot(path=output_path, full_page=True)
             except Exception:
                 logger.warning("full_page 截图失败，尝试视口截图...")
-                page.screenshot(path=output_path, full_page=False)
+                await page.screenshot(path=output_path, full_page=False)
             finally:
-                browser.close()
+                await browser.close()
 
         logger.info(f"截图已保存至: {output_path}")
 
@@ -137,12 +136,9 @@ class AIHTML(BasePlugin):
                     f.write(html)
                 logger.info(f"HTML 已保存至: {html_path}")
 
-            # 渲染截图（同步操作放到线程池避免阻塞事件循环）
+            # 渲染截图
             logger.info("开始渲染截图...")
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(
-                None, self._render_html_to_image, html, str(png_path)
-            )
+            await self._render_html_to_image(html, str(png_path))
 
             # 通过 notice 发送图片到会话
             if event:

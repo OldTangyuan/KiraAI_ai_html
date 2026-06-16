@@ -17,14 +17,15 @@ SCREENSHOT_HEIGHT = 800
 DEBUG_SAVE_HTML = True
 
 
-async def find_system_browser():
+async def find_or_install_browser():
     """
     检测系统中可用的 Chrome/Chromium/Edge 浏览器。
-    返回 (channel_name, 显示名称)，若都不可用返回 None。
+    若都不存在，则异步下载 Playwright 内置 Chromium。
+    返回 (channel_name: str | None)，channel=None 表示使用内置 Chromium。
     """
     candidates = [
-        ("chrome",  "Google Chrome"),
-        ("msedge",  "Microsoft Edge"),
+        ("chrome",   "Google Chrome"),
+        ("msedge",   "Microsoft Edge"),
         ("chromium", "Chromium"),
     ]
 
@@ -38,15 +39,39 @@ async def find_system_browser():
         except Exception:
             continue
 
-    # 最后尝试无 channel（Playwright 内置 Chromium）
+    # 系统无可用浏览器 → 在后台安装 Playwright 内置 Chromium
+    logger.info("未检测到系统浏览器，将在后台下载 Chromium（首次需要较长时间）...")
+
+    # 安装 Chromium
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "playwright", "install", "chromium",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(stderr.decode() if stderr else f"退出码 {proc.returncode}")
+        logger.info("Chromium 下载完成。")
+    except Exception as e:
+        raise RuntimeError(
+            f"Chromium 自动下载失败: {e}\n"
+            f"请尝试手动运行: {sys.executable} -m playwright install chromium"
+        )
+
+    # 验证安装
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             await browser.close()
-        logger.info("未检测到系统浏览器，使用 Playwright 内置 Chromium。")
-        return None
-    except Exception:
-        return None
+        logger.info("Chromium 安装验证通过。")
+    except Exception as e:
+        raise RuntimeError(
+            f"Chromium 安装后仍无法启动: {e}\n"
+            f"当前系统可能缺少必要的运行时库。"
+        )
+
+    return None  # None = 使用内置 Chromium（不指定 channel）
 
 
 class AIHTML(BasePlugin):
@@ -67,16 +92,16 @@ class AIHTML(BasePlugin):
         logger.info('AIHTML 插件加载完成！（浏览器检测将在后台进行）')
 
     async def _init_browser(self):
-        """后台检测系统中可用的 Chrome/Chromium/Edge 浏览器。"""
+        """后台检测系统浏览器，若没有则自动下载内置 Chromium。"""
         try:
-            channel = await find_system_browser()
+            channel = await find_or_install_browser()
             self._browser_channel = channel
             if channel:
                 logger.info(f"将使用系统浏览器 (channel={channel}) 渲染截图。")
             else:
-                logger.warning("未找到任何可用的浏览器，插件渲染功能不可用。")
+                logger.info("将使用 Playwright 内置 Chromium 渲染截图。")
         except Exception as e:
-            logger.error(f"浏览器检测失败: {e}")
+            logger.error(f"浏览器初始化失败，插件渲染功能不可用: {e}")
         finally:
             self._browser_ready.set()
 
@@ -147,7 +172,7 @@ class AIHTML(BasePlugin):
         核心整合逻辑：
           1. 校验并保存 LLM 主模型传入的 HTML 代码
           2. 用 Playwright 渲染截图
-          3. 通过 publish_notice 发送图片到会话
+          3. 通过 adapter 直接发送图片到会话
           4. 返回文字结果回 LLM
         """
         if not description or len(description.strip()) < 3:
@@ -180,15 +205,22 @@ class AIHTML(BasePlugin):
             logger.info("开始渲染截图...")
             await self._render_html_to_image(html, str(png_path))
 
-            # 通过 notice 发送图片到会话
+            # 通过 adapter 直接发送图片
             if event:
-                img = Image(image=str(png_path))
-                chain = MessageChain([img])
-                await self.ctx.publish_notice(
-                    session=event.session.session_id,
-                    chain=chain,
-                    is_mentioned=True
-                )
+                ada = self.ctx.adapter_mgr.get_adapter(event.session.adapter_name)
+                if ada:
+                    img = Image(image=str(png_path))
+                    chain = MessageChain([img])
+                    if event.is_group_message():
+                        await ada.send_group_message(
+                            group_id=event.session.session_id,
+                            send_message_obj=chain
+                        )
+                    else:
+                        await ada.send_direct_message(
+                            user_id=event.session.session_id,
+                            send_message_obj=chain
+                        )
 
             return f"成功！网页截图已保存至：{png_path}"
 
@@ -207,7 +239,7 @@ class AIHTML(BasePlugin):
         description="将你已生成的 HTML 代码渲染为网页截图并发送到当前会话。"
                     "调用前请先生成简洁美观的 HTML 代码（含 <!DOCTYPE html>），"
                     "注意：不要包含 JavaScript 交互代码或复杂动画，"
-                    "因为页面会以静态图片形式展示给用户。页面设计应简洁清晰、色彩搭配舒适。",
+                    "因为页面会以静态图片形式展示给用户，且图片会被系统自动发送给用户，因此你不需要额外生图。页面设计应简洁清晰、色彩搭配舒适。",
         params={
             "type": "object",
             "properties": {
@@ -218,7 +250,7 @@ class AIHTML(BasePlugin):
                 "html_code": {
                     "type": "string",
                     "description": "您生成的完整 HTML 代码，必须包含 <!DOCTYPE html>。"
-                                   "页面应简洁美观，无需 JS 交互逻辑。",
+                                   "页面应简洁美观，无需 JS 交互逻辑。理论上你可以通过 HTML 生成一切内容，或与用户进行文本对话来进一步调整 HTML 来实现类似直接在网页点击的交互效果。",
                 },
             },
             "required": ["description", "html_code"],

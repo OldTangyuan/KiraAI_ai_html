@@ -23,7 +23,9 @@ async def ensure_chromium_installed():
     """
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch()
+            browser = await p.chromium.launch(
+                args=['--no-sandbox', '--disable-setuid-sandbox']
+            )
             await browser.close()
         logger.info("Chromium 已存在，跳过安装。")
     except PlaywrightError as e:
@@ -45,6 +47,8 @@ class AIHTML(BasePlugin):
         super().__init__(ctx, cfg)
         self.data_dir: Path = None
         self.output_dir: Path = None
+        self._playwright = None
+        self._browser = None
 
     async def initialize(self):
         """插件加载时调用，在此初始化资源、注册事件等"""
@@ -52,53 +56,59 @@ class AIHTML(BasePlugin):
         self.data_dir = self.ctx.get_plugin_data_dir()
         self.output_dir = self.data_dir / "output"
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        # 启动长驻浏览器实例，避免每次调用 launch/close
+        self._playwright = await async_playwright().start()
+        self._browser = await self._playwright.chromium.launch(
+            headless=True,
+            args=['--no-sandbox', '--disable-setuid-sandbox']
+        )
         logger.info('AIHTML 插件加载完成！')
 
     async def terminate(self):
-        pass
+        """插件卸载时关闭浏览器"""
+        if self._browser:
+            await self._browser.close()
+        if self._playwright:
+            await self._playwright.stop()
 
     # ==================== 核心逻辑 ====================
 
-    @staticmethod
-    async def _render_html_to_image(html_content: str, output_path: str):
+    async def _render_html_to_image(self, html_content: str, output_path: str):
         """
-        使用 Playwright 将 HTML 渲染为 PNG 截图（异步函数）。
+        使用 Playwright 将 HTML 渲染为 PNG 截图（复用长驻浏览器）。
         """
         if not html_content or len(html_content) < 30:
             raise ValueError("HTML 内容为空或过短，无法渲染。")
 
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page(
-                viewport={"width": SCREENSHOT_WIDTH, "height": SCREENSHOT_HEIGHT}
+        context = await self._browser.new_context(
+            viewport={"width": SCREENSHOT_WIDTH, "height": SCREENSHOT_HEIGHT}
+        )
+        page = await context.new_page()
+
+        try:
+            await page.set_content(
+                html_content, wait_until="domcontentloaded", timeout=10000
             )
+        except Exception as e:
+            await context.close()
+            raise RuntimeError(f"Playwright 加载 HTML 失败: {e}")
 
-            try:
-                await page.set_content(
-                    html_content, wait_until="domcontentloaded", timeout=10000
-                )
-            except Exception as e:
-                await browser.close()
-                raise RuntimeError(f"Playwright 加载 HTML 失败: {e}")
+        await page.wait_for_timeout(1500)
+        try:
+            await page.wait_for_function(
+                "document.body && document.body.scrollHeight > 10",
+                timeout=3000
+            )
+        except Exception:
+            logger.warning("检测到 body 高度可能为 0，页面可能空白。")
 
-            await page.wait_for_timeout(1500)
-            try:
-                await page.wait_for_function(
-                    "document.body && document.body.scrollHeight > 10",
-                    timeout=3000
-                )
-            except Exception:
-                logger.warning("检测到 body 高度可能为 0，页面可能空白。")
-
-            try:
-                await page.screenshot(path=output_path, full_page=True)
-            except Exception:
-                logger.warning("full_page 截图失败，尝试视口截图...")
-                await page.screenshot(path=output_path, full_page=False)
-            finally:
-                await browser.close()
-
-        logger.info(f"截图已保存至: {output_path}")
+        try:
+            await page.screenshot(path=output_path, full_page=True)
+        except Exception:
+            logger.warning("full_page 截图失败，尝试视口截图...")
+            await page.screenshot(path=output_path, full_page=False)
+        finally:
+            await context.close()
 
     async def _generate_and_save_webpage(
         self, description: str, html_code: str, event: KiraMessageBatchEvent = None

@@ -1,7 +1,7 @@
 {
     "display_name": "AIHTML",
     "plugin_id": "kira-plugin-AIHTML",
-    "version": "1.0",
+    "version": "1.1",
     "core_version": ">=1.0.0",
     "author": "Old_tangyuan",
     "description": "你可以通过这个插件让AI生成HTML并以图片形式渲染发送出来，你甚至可以通过文本对话来让AI基于HTML进一步渲染。建议在自带浏览器的设备运行。",

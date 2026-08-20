@@ -1,0 +1,29 @@
+<!-- 白天主题 HTML 图标 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="100%" height="100%">
+  <defs>
+    <!-- 白天主题背景渐变 -->
+    <linearGradient id="dayBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#f8fafc"/>
+    </linearGradient>
+    <!-- 白天主题阴影 -->
+    <filter id="dayShadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#0f172a" flood-opacity="0.05"/>
+    </filter>
+  </defs>
+  <!-- 背景底板 -->
+  <rect width="64" height="64" rx="14" fill="url(#dayBg)" stroke="#e2e8f0" stroke-width="2" filter="url(#dayShadow)"/>
+  
+  <!-- 核心代码括号：< 和 > -->
+  <g fill="none" stroke="#f97316" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+    <!-- 左括号 < -->
+    <path d="M20 24 L28 32 L20 40" />
+    <!-- 右括号 > -->
+    <path d="M44 24 L36 32 L44 40" />
+  </g>
+  <!-- 核心代码斜线：/ -->
+  <line x1="28" y1="44" x2="36" y2="20" stroke="#f97316" stroke-width="5" stroke-linecap="round"/>
+  
+  <!-- 底部文字标识 -->
+  <text x="32" y="54" font-family="'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-weight="900" font-size="10" fill="#0f172a" text-anchor="middle" letter-spacing="1">HTML</text>
+</svg>
